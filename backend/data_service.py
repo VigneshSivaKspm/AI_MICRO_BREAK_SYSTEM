@@ -5,7 +5,7 @@ Bridges modules with database for persistent storage and retrieval
 
 import logging
 from datetime import datetime, date
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Union
 from backend.database_manager import get_database_manager
 import json
 

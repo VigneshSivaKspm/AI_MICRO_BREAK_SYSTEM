@@ -6,7 +6,7 @@ MySQL version for XAMPP with connection pooling and thread safety
 import logging
 import mysql.connector
 from mysql.connector import pooling, Error
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Union
 from config.config import DATABASE_CONFIG
 import threading
 import time
