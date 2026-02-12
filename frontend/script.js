@@ -188,6 +188,9 @@ async function startActivity(activityName, durationMin) {
     }
 }
 
+// Make globally available
+window.startActivity = startActivity;
+
 async function stopCurrentBreak() {
     try {
         const response = await fetch(`${API_BASE}/breaks/stop`, { method: 'POST' });

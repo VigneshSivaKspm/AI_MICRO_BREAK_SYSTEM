@@ -7,7 +7,7 @@ import cv2
 import numpy as np
 import logging
 from datetime import datetime
-from typing import Dict, Tuple, Optional
+from typing import Dict, Tuple, Optional, List
 from config.config import FATIGUE_CONFIG, ML_CONFIG
 import threading
 import time
