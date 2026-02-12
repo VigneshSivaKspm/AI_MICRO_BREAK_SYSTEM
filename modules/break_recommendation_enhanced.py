@@ -80,6 +80,34 @@ class BreakRecommender:
         except Exception as e:
             logger.error(f"Error getting recommendation: {e}")
             return self._get_fallback_recommendation(user_id, current_state, [])
+
+    def get_recommendations(self, fatigue_status: Dict, activity_summary: Dict, user_id: int, count: int = 2) -> List[Dict]:
+        """
+        Get multiple personalized break recommendations
+        
+        Args:
+            fatigue_status: Current user fatigue metrics
+            activity_summary: Recent activity summary
+            user_id: User identifier
+            count: Number of recommendations to return
+            
+        Returns:
+            List of break recommendations
+        """
+        recommendations = []
+        current_state = {
+            'fatigue_level': fatigue_status.get('fatigue_level', 'medium'),
+            'available_time': 5, # Default to 5 minutes
+            'activity_summary': activity_summary
+        }
+        
+        for _ in range(count):
+            rec = self.get_recommendation(user_id, current_state)
+            recommendations.append(rec)
+            # Temporarily add to history to prevent duplicate in the same set
+            self.recommendation_history.append({'activity': rec.get('activity')})
+            
+        return recommendations
     
     def _get_fallback_recommendation(self, user_id: int, current_state: Dict, recent: List[str]) -> Dict:
         """Get fallback recommendation from predefined list"""

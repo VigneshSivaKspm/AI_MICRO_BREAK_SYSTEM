@@ -426,17 +426,30 @@ class FatigueDetector:
                 'alert_generated': self.current_fatigue_score > self.min_fatigue_score,
                 'timestamp': datetime.now().isoformat()
             }
-        return {
-            'fatigue_score': self.current_fatigue_score,
-            'eye_strain_level': self.eye_strain_level,
-            'posture_score': self.posture_score,
-            'blink_rate': self.blink_rate,
-            'facial_expression': self.facial_expression,
-            'trend': self.fatigue_trend,
-            'should_take_break': self.current_fatigue_score >= self.min_fatigue_score,
-            'timestamp': datetime.now().isoformat()
-        }
-    
+
+    def get_recommendations_for_fatigue(self) -> List[Dict]:
+        """Get break recommendations based on current fatigue level"""
+        status = self.get_fatigue_status()
+        fatigue_score = status.get('fatigue_score', 0)
+        
+        recs = []
+        if fatigue_score > 0.8:
+            recs = [
+                {'activity': 'Short Walk', 'duration': 10, 'reason': 'High fatigue detected'},
+                {'activity': 'Power Nap', 'duration': 15, 'reason': 'Critical fatigue level'}
+            ]
+        elif fatigue_score > 0.6:
+            recs = [
+                {'activity': 'Stretching', 'duration': 5, 'reason': 'Moderate fatigue detected'},
+                {'activity': 'Deep Breathing', 'duration': 3, 'reason': 'Refocusing needed'}
+            ]
+        else:
+            recs = [
+                {'activity': 'Eye Exercise', 'duration': 1, 'reason': 'Preventative maintenance'},
+                {'activity': 'Hydration', 'duration': 2, 'reason': 'Keep energy levels up'}
+            ]
+        return recs
+
     def reset_metrics(self):
         """Reset fatigue metrics (e.g., after a break)"""
         self.current_fatigue_score = max(0.0, self.current_fatigue_score - 0.3)

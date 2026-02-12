@@ -36,7 +36,7 @@ class BreakEnforcer:
         Enforce a break with specified parameters
         
         Args:
-            duration: Break duration in seconds
+            duration: Break duration in SECONDS
             break_type: Type of break (micro, regular, long, forced)
             lock_screen: Whether to lock screen
             mute_input: Whether to mute inputs
@@ -197,7 +197,8 @@ class BreakEnforcer:
         try:
             from win10toast import ToastNotifier
             toaster = ToastNotifier()
-            toaster.show_toast(title, message, duration=duration)
+            # Use threaded=True to prevent blocking the main thread
+            toaster.show_toast(title, message, duration=duration, threaded=True)
         except:
             logger.warning("Could not show Windows notification")
     

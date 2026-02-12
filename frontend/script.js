@@ -147,18 +147,57 @@ function displayRecommendations(recommendations) {
     recommendations.forEach(rec => {
         const card = document.createElement('div');
         card.className = 'recommendation-card';
+        const title = rec.activity || rec.title || rec.category;
+        const duration = rec.duration_min || rec.duration || 5;
+        
         card.innerHTML = `
-            <h4>${rec.title || rec.category}</h4>
-            <p class="description">${rec.description || ''}</p>
-            <p class="duration">⏱️ ${rec.duration || 5} minutes</p>
-            <button class="btn btn-small btn-primary" onclick="startActivity('${rec.title || rec.category}')">Start Activity</button>
+            <h4>${title}</h4>
+            <p class="description">${rec.reason || rec.description || ''}</p>
+            <p class="duration">⏱️ ${duration} minute${duration > 1 ? 's' : ''}</p>
+            <button class="btn btn-small btn-primary" onclick="startActivity('${title}', ${duration})">Start Activity</button>
         `;
         container.appendChild(card);
     });
 }
 
-function startActivity(activityName) {
-    showAlert(`Started: ${activityName}`, 'success');
+async function startActivity(activityName, durationMin) {
+    try {
+        const duration = durationMin || 5;
+        const response = await fetch(`${API_BASE}/breaks/enforce`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                duration: duration,
+                break_type: 'personalized',
+                lock_screen: false,
+                mute_input: false,
+                reason: activityName
+            })
+        });
+        
+        if (response.ok) {
+            showAlert(`Activity started: ${activityName} (${duration} min)`, 'success');
+            updateBreakStatus();
+        } else {
+            const data = await response.json();
+            showAlert(data.error || 'Failed to start activity', 'danger');
+        }
+    } catch (error) {
+        console.error('Error starting activity:', error);
+        showAlert('Error starting activity', 'danger');
+    }
+}
+
+async function stopCurrentBreak() {
+    try {
+        const response = await fetch(`${API_BASE}/breaks/stop`, { method: 'POST' });
+        if (response.ok) {
+            showAlert('Break cancelled', 'info');
+            updateBreakStatus();
+        }
+    } catch (error) {
+        console.error('Error stopping break:', error);
+    }
 }
 
 // ==================== DATA UPDATES ====================
@@ -174,7 +213,7 @@ function startDataUpdates() {
         } else {
             await updateAllData();
         }
-    }, 30000);  // Update every 30 seconds to reduce server load
+    }, 2000);  // Changed from 30s to 2s for real-time timer updates
     
     // Initial update immediately
     updateAllData();
@@ -191,15 +230,16 @@ function stopDataUpdates() {
 async function updateAllData() {
     try {
         // Run updates in parallel but with proper error handling
-        const [activityResult, fatigueResult, breakResult] = await Promise.allSettled([
+        const [activityResult, fatigueResult, breakResult, analyticsResult] = await Promise.allSettled([
             updateActivityData(),
             updateFatigueData(),
-            updateBreakStatus()
+            updateBreakStatus(),
+            loadAnalytics()
         ]);
         
         // Check for failures
         let hasFailures = false;
-        [activityResult, fatigueResult, breakResult].forEach((result, index) => {
+        [activityResult, fatigueResult, breakResult, analyticsResult].forEach((result, index) => {
             if (result.status === 'rejected') {
                 console.error(`Update ${index} failed:`, result.reason);
                 hasFailures = true;
@@ -227,7 +267,7 @@ async function updateAllDataWithRetry() {
 async function updateActivityData() {
     try {
         const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 10000);  // 10 second timeout
+        const timeoutId = setTimeout(() => controller.abort(), 15000);  // Increased to 15s
         
         const response = await fetch(`${API_BASE}/activity/current?user_id=${currentUserId}`, {
             signal: controller.signal
@@ -241,7 +281,19 @@ async function updateActivityData() {
             document.getElementById('keyboard-presses').textContent = data.total_keyboard_presses || 0;
             document.getElementById('idle-time').textContent = Math.round((data.total_idle_time || 0));
             
-            // Use activity_level from API (already calculated as percentage 0-100)
+            // Format screen time
+            const screenSeconds = data.screen_time || 0;
+            const mins = Math.floor(screenSeconds / 60);
+            const secs = Math.floor(screenSeconds % 60);
+            const hrs = Math.floor(mins / 60);
+            const displayTime = hrs > 0 ? 
+                `${hrs}h ${mins % 60}m ${secs}s` : 
+                `${mins}m ${secs}s`;
+            
+            const screenTimeElem = document.getElementById('screen-time-display');
+            if (screenTimeElem) screenTimeElem.textContent = displayTime;
+            
+            // Use activity_level from API
             const activityLevel = Math.round(data.activity_level || 0);
             document.getElementById('activity-progress').style.width = activityLevel + '%';
             document.getElementById('activity-level').textContent = activityLevel + '%';
@@ -266,7 +318,7 @@ async function updateActivityData() {
 async function updateFatigueData() {
     try {
         const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 10000);  // 10 second timeout
+        const timeoutId = setTimeout(() => controller.abort(), 15000);  // Increased to 15s
         
         const response = await fetch(`${API_BASE}/fatigue/status?user_id=${currentUserId}`, {
             signal: controller.signal
@@ -319,9 +371,10 @@ async function updateFatigueData() {
 async function updateBreakStatus() {
     try {
         const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 10000);  // 10 second timeout
+        const timeoutId = setTimeout(() => controller.abort(), 15000);
         
-        const response = await fetch(`${API_BASE}/breaks/status?user_id=${currentUserId}`, {
+        // Add timestamp to prevent caching
+        const response = await fetch(`${API_BASE}/breaks/status?user_id=${currentUserId}&t=${Date.now()}`, {
             signal: controller.signal
         });
         clearTimeout(timeoutId);
@@ -330,6 +383,21 @@ async function updateBreakStatus() {
         
         if (response.ok) {
             const infoDiv = document.getElementById('enforcement-info');
+            
+            // Handle active break timer
+            if (data.is_enforcing && data.time_remaining > 0) {
+                const mins = Math.floor(data.time_remaining / 60);
+                const secs = data.time_remaining % 60;
+                infoDiv.innerHTML = `
+                    <div class="enforcement-active" style="background: #fff3cd; padding: 15px; border-radius: 8px; border-left: 5px solid #ffc107;">
+                        <h4 style="color: #856404; margin-bottom: 5px;">🔒 Break in Progress</h4>
+                        <p style="font-size: 24px; font-weight: bold; margin: 10px 0;">${mins}m ${secs}s remaining</p>
+                        <button class="btn btn-small btn-danger" onclick="stopCurrentBreak()">Cancel Break</button>
+                    </div>
+                `;
+                return; // Skip the rest of the status update
+            }
+
             if (data.breaks_today && data.breaks_today > 0) {
                 infoDiv.innerHTML = `
                     <div class="enforcement-active">
@@ -393,40 +461,6 @@ function formatTime(seconds) {
     return `${hours}h ${minutes}min`;
 }
 
-// ==================== PROFILE ====================
-
-document.getElementById('btn-save-preferences')?.addEventListener('click', async () => {
-    try {
-        const preferences = {
-            preferred_break_duration: parseInt(document.getElementById('profile-break-duration')?.value || 5),
-            break_interval: parseInt(document.getElementById('profile-break-interval')?.value || 30),
-            webcam_enabled: document.getElementById('pref-webcam')?.checked || false,
-            notifications_enabled: document.getElementById('pref-notifications')?.checked || true,
-            sound_enabled: document.getElementById('pref-sound')?.checked || true
-        };
-        
-        const response = await fetch(`${API_BASE}/personalization/preferences`, {
-            method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                user_id: currentUserId,
-                preferences: preferences
-            })
-        });
-        
-        const data = await response.json();
-        
-        if (response.ok) {
-            showAlert('Preferences saved successfully', 'success');
-        } else {
-            showAlert(data.error || 'Failed to save preferences', 'danger');
-        }
-    } catch (error) {
-        console.error('Error saving preferences:', error);
-        showAlert('Failed to save preferences', 'danger');
-    }
-});
-
 // ==================== ALERTS ====================
 
 function showAlert(message, type = 'info') {
@@ -460,10 +494,4 @@ document.addEventListener('DOMContentLoaded', () => {
     
     // Load initial data
     loadAnalytics();
-    
-    // Set default values
-    document.getElementById('profile-break-duration').value = 5;
-    document.getElementById('profile-break-interval').value = 30;
-    document.getElementById('pref-notifications').checked = true;
-    document.getElementById('pref-sound').checked = true;
 });

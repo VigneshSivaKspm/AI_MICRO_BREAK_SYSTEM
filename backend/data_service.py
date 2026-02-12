@@ -105,9 +105,13 @@ class DataService:
     
     # ==================== BREAK LOGGING ====================
     
-    def log_break(self, user_id: int, break_data: Dict) -> bool:
-        """Log break to database"""
+    def log_break(self, user_id: int, break_data: Dict) -> Union[bool, int]:
+        """Log break and return ID if successful"""
         return self.db.log_break(user_id, break_data)
+    
+    def update_break_compliance(self, break_id: int, status: str) -> bool:
+        """Update break compliance status"""
+        return self.db.update_break_status(break_id, status)
     
     def get_breaks_today(self, user_id: int) -> List[Dict]:
         """Get all breaks taken today"""

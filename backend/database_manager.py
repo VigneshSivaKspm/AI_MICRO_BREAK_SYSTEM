@@ -87,13 +87,14 @@ class DatabaseManager:
         """Close all connections in the pool"""
         try:
             if self.connection_pool:
-                self.connection_pool.close()
-                logger.info("Connection pool closed")
-        except Error as e:
-            logger.error(f"Error closing connection pool: {e}")
+                # MySQLConnectionPool doesn't have a close() method in mysql-connector-python
+                self.connection_pool = None
+                logger.info("Connection pool cleared")
+        except Exception as e:
+            logger.error(f"Error clearing connection pool: {e}")
     
-    def execute_query(self, query: str, params: List = None, retries: int = 2) -> bool:
-        """Execute a query (INSERT, UPDATE, DELETE) with connection pooling"""
+    def execute_query(self, query: str, params: List = None, retries: int = 2) -> Union[bool, int]:
+        """Execute a query (INSERT, UPDATE, DELETE) and return success or last row ID"""
         for attempt in range(retries):
             try:
                 with self.get_connection() as connection:
@@ -105,8 +106,12 @@ class DatabaseManager:
                             cursor.execute(query)
                         
                         connection.commit()
-                        if attempt > 0:  # Only log if there were retries
-                            logger.debug(f"Query succeeded on attempt {attempt + 1}: {query[:50]}...")
+                        
+                        # If it was an INSERT, return the ID
+                        if query.strip().upper().startswith('INSERT'):
+                            last_id = cursor.lastrowid
+                            return last_id if last_id else True
+                            
                         return True
                     finally:
                         cursor.close()
@@ -236,6 +241,15 @@ class DatabaseManager:
             logger.error(f"Error logging break: {e}")
             return False
     
+    def update_break_status(self, break_id: int, status: str) -> bool:
+        """Update compliance status of a break"""
+        try:
+            query = "UPDATE BreakRecords SET ComplianceStatus = %s WHERE BreakID = %s"
+            return bool(self.execute_query(query, [status, break_id]))
+        except Exception as e:
+            logger.error(f"Error updating break status: {e}")
+            return False
+
     def get_user_by_email(self, email: str) -> Optional[Dict]:
         """Get user by email with improved error handling"""
         try:

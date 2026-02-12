@@ -22,9 +22,10 @@ class ActivityMonitor:
     def __init__(self):
         self.mouse_clicks = 0
         self.keyboard_presses = 0
-        self.screen_time = 0
-        self.idle_time = 0
+        self.total_active_seconds = 0
+        self.total_idle_seconds = 0
         self.last_activity_time = datetime.now()
+        self.start_time = datetime.now()
         self.is_monitoring = False
         self.activity_buffer = deque(maxlen=ACTIVITY_CONFIG['activity_buffer_size'])
         self.listener_thread = None
@@ -36,6 +37,7 @@ class ActivityMonitor:
         self._mouse_listener = None
         self._keyboard_listener = None
         self._stop_event = threading.Event()
+        self._last_tick_time = time.time()
         
     def _on_move(self, x, y):
         """Callback for mouse movement"""
@@ -143,9 +145,19 @@ class ActivityMonitor:
         while not self._stop_event.is_set():
             try:
                 current_time = datetime.now()
+                now_ts = time.time()
+                elapsed = now_ts - self._last_tick_time
+                self._last_tick_time = now_ts
                 
                 with self._lock:
                     time_since_activity = (current_time - self.last_activity_time).total_seconds()
+                    
+                    # Accumulate time based on activity
+                    if time_since_activity > self.idle_threshold:
+                        self.total_idle_seconds += elapsed
+                    else:
+                        self.total_active_seconds += elapsed
+                        
                     mouse_clicks = self.mouse_clicks
                     keyboard_presses = self.keyboard_presses
                 
@@ -155,54 +167,59 @@ class ActivityMonitor:
                     'keyboard_presses': keyboard_presses,
                     'idle_time': time_since_activity,
                     'is_idle': time_since_activity > self.idle_threshold,
-                    'screen_time': self._get_screen_time()
+                    'screen_time': int(self.total_active_seconds)
                 }
                 
                 self.activity_buffer.append(activity_data)
+                logger.debug(f"Activity Tick: {mouse_clicks} clicks, {keyboard_presses} keys, Active: {int(self.total_active_seconds)}s")
                 
                 # Wait for the interval or stop event
                 self._stop_event.wait(self.monitor_interval)
                 
             except Exception as e:
                 logger.error(f"Error in monitoring loop: {e}")
-                time.sleep(1)  # Brief pause before continuing
+                time.sleep(1)
     
     def get_activity_summary(self) -> Dict:
         """Get activity summary for the current period with thread safety"""
         with self._lock:
-            if not self.activity_buffer:
-                return self._get_empty_summary()
-            
+            # Use total active seconds as a basis for screen time
+            screen_time = int(self.total_active_seconds)
             total_clicks = self.mouse_clicks
             total_presses = self.keyboard_presses
             time_since_activity = (datetime.now() - self.last_activity_time).total_seconds()
             
+            # Diagnostics
+            mouse_status = "ok" if self._mouse_listener and self._mouse_listener.is_alive() else "stopped"
+            kb_status = "ok" if self._keyboard_listener and self._keyboard_listener.is_alive() else "stopped"
+            
             return {
                 'mouse_clicks': total_clicks,
                 'keyboard_presses': total_presses,
-                'idle_time': time_since_activity,
+                'idle_time': int(time_since_activity),
                 'is_idle': time_since_activity > self.idle_threshold,
                 'activity_level': self._calculate_activity_level(total_clicks, total_presses),
                 'last_activity': self.last_activity_time.isoformat(),
-                'buffer_size': len(self.activity_buffer)
+                'screen_time': screen_time,
+                'buffer_size': len(self.activity_buffer),
+                'diagnostics': {
+                    'mouse_listener': mouse_status,
+                    'keyboard_listener': kb_status
+                }
             }
     
     def _calculate_activity_level(self, clicks: int, presses: int) -> float:
-        """Calculate activity level (0-1)"""
+        """Calculate activity level (0-1) based on actions per minute"""
         total_actions = clicks + presses
-        # Normalize to 0-1 range (assuming max 200 actions in monitoring period)
-        activity_level = min(1.0, total_actions / 200.0)
+        uptime_minutes = (datetime.now() - self.start_time).total_seconds() / 60.0
+        
+        if uptime_minutes < 0.1:  # Avoid division by zero
+            return 0.0
+            
+        actions_per_minute = total_actions / uptime_minutes
+        # Normalize: 50 actions per minute is considered 100% active
+        activity_level = min(1.0, actions_per_minute / 50.0)
         return activity_level
-    
-    def _get_screen_time(self) -> int:
-        """Get screen on time in seconds (Windows specific)"""
-        try:
-            # Get screen time from Windows Event Viewer or system metrics
-            # This is a simplified version
-            return 0
-        except Exception as e:
-            logger.warning(f"Could not get screen time: {e}")
-            return 0
     
     def reset_counters(self):
         """Reset activity counters with thread safety"""

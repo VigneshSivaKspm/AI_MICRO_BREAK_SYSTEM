@@ -4,7 +4,11 @@ Flask backend API for AI Micro Break System
 
 import logging
 import os
-from datetime import datetime
+import threading
+import time
+import signal
+import atexit
+from datetime import datetime, date
 from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
 import sys
@@ -48,6 +52,65 @@ break_enforcer = get_break_enforcer()
 break_recommender = get_break_recommender()
 personalization_engine = get_personalization_engine()
 productivity_analytics = get_productivity_analytics()
+
+# Background monitoring task control
+monitor_thread_running = False
+monitor_thread = None
+
+def system_monitor_loop():
+    """Background task to bridge modules and log data periodically"""
+    global monitor_thread_running
+    logger.info("Background monitoring task started")
+    
+    last_log_time = time.time()
+    log_interval = 60  # Log to DB/Update Analytics every 60 seconds (for better UI responsiveness)
+    
+    while monitor_thread_running:
+        try:
+            if activity_monitor.is_monitoring:
+                current_time = time.time()
+                activity_summary = activity_monitor.get_activity_summary()
+                fatigue_status = fatigue_detector.get_fatigue_status()
+                
+                # Check for high fatigue and trigger break warning
+                fatigue_score = fatigue_status.get('fatigue_score', 0)
+                if fatigue_score > 0.85 and not break_enforcer.is_enforcing:
+                    logger.warning(f"HIGH FATIGUE DETECTED ({fatigue_score}). Ready for break enforcement.")
+                    # In a real "world class" app, we might notify the user here
+                
+                # Periodically log to database
+                if current_time - last_log_time >= log_interval:
+                    user_id = 1 # Default user
+                    
+                    # Log activity and fatigue
+                    data_service.log_activity(user_id, activity_summary)
+                    data_service.log_fatigue(user_id, fatigue_status)
+                    
+                    # Update local metrics for productivity calculations
+                    productivity_analytics.record_productivity_session(user_id, {
+                        'duration': log_interval,
+                        'activity_summary': activity_summary
+                    })
+                    
+                    # Sync to database for analytics dashboard
+                    daily_metrics = productivity_analytics.calculate_daily_metrics(user_id)
+                    if daily_metrics:
+                        data_service.upsert_daily_analytics(user_id, daily_metrics)
+                    
+                    last_log_time = current_time
+                    logger.info("Periodic activity, fatigue, and analytics data logged to database")
+            
+            time.sleep(10) # Check every 10 seconds
+        except Exception as e:
+            logger.error(f"Error in background monitoring loop: {e}")
+            time.sleep(30) # Back off on error
+
+def start_background_task():
+    global monitor_thread_running, monitor_thread
+    if not monitor_thread_running:
+        monitor_thread_running = True
+        monitor_thread = threading.Thread(target=system_monitor_loop, daemon=True)
+        monitor_thread.start()
 
 # ==================== HEALTH CHECK ====================
 
@@ -254,9 +317,11 @@ def get_current_activity():
                 'total_mouse_clicks': activity_data.get('mouse_clicks', 0),
                 'total_keyboard_presses': activity_data.get('keyboard_presses', 0),
                 'total_idle_time': activity_data.get('idle_time', 0),
-                'activity_level': activity_data.get('activity_level', 0),
+                'activity_level': round(activity_data.get('activity_level', 0) * 100, 1),
                 'last_activity_time': activity_data.get('last_activity', ''),
                 'is_idle': activity_data.get('is_idle', False),
+                'screen_time': activity_data.get('screen_time', 0),
+                'diagnostics': activity_data.get('diagnostics', {}),
                 'monitoring_status': 'active'
             }), 200
         else:
@@ -353,8 +418,14 @@ def get_fatigue_recommendations():
 
 @app.route('/api/v1/breaks/enforce', methods=['POST'])
 def enforce_break():
-    """Enforce a break"""
+    """Enforce a break with single-instance check"""
     try:
+        if break_enforcer.is_enforcing:
+            return jsonify({
+                'message': 'Break already in progress',
+                'status': 'busy'
+            }), 400
+
         data = request.get_json() or {}
         user_id = data.get('user_id', 1)
         duration = data.get('duration', 5)  # minutes
@@ -366,17 +437,34 @@ def enforce_break():
         break_record = {
             'duration': duration,
             'break_type': break_type,
-            'reason': 'Enforced Break',
+            'reason': data.get('reason', 'Enforced Break'),
             'compliance_status': 'In Progress'
         }
-        data_service.log_break(user_id, break_record)
+        break_id = data_service.log_break(user_id, break_record)
         
+        # Start break enforcement with record tracking
         break_enforcer.enforce_break(
             duration * 60,  # Convert to seconds
             break_type,
             lock_screen,
             mute_input
         )
+        
+        # Add to local analytics for immediate UI updates
+        productivity_analytics.record_break_session(user_id, {
+            'duration': duration * 60,
+            'break_type': break_type,
+            'forced': True,
+            'complied': True # Assume compliance unless they bypass (if bypass exists)
+        })
+        
+        # Update break status to completed once it's done (simple async-like update)
+        def mark_break_complete(b_id):
+            time.sleep(duration * 60)
+            data_service.update_break_compliance(b_id, 'Completed')
+            
+        if isinstance(break_id, int):
+            threading.Thread(target=mark_break_complete, args=(break_id,), daemon=True).start()
         
         # Show notification
         break_enforcer.show_notification(
@@ -403,10 +491,26 @@ def get_break_status():
         breaks_today = data_service.get_breaks_today(user_id)
         compliance_rate = data_service.get_break_compliance_rate(user_id, days=7)
         
+        # Check if a break is CURRENTLY being enforced
+        is_enforcing = break_enforcer.is_enforcing
+        time_remaining = 0
+        if is_enforcing and break_enforcer.start_time:
+            # datetime.now() vs break_enforcer.start_time
+            # Ensure both are naive or both are aware. Here we use naive local time.
+            now = datetime.now()
+            elapsed = (now - break_enforcer.start_time).total_seconds()
+            time_remaining = max(0, break_enforcer.break_duration - elapsed)
+            
+            # If time is up but enforcement flag is still True, double check
+            if time_remaining <= 0:
+                is_enforcing = False
+        
         return jsonify({
+            'is_enforcing': is_enforcing,
+            'time_remaining': int(time_remaining),
             'breaks_today': len(breaks_today),
             'compliance_rate': compliance_rate,
-            'recent_breaks': breaks_today[:5] if breaks_today else []
+            'recent_breaks': [str(b) for b in (breaks_today[:5] if breaks_today else [])]
         }), 200
     except Exception as e:
         logger.error(f"Error getting break status: {e}")
@@ -569,23 +673,31 @@ def internal_error(error):
 
 # ==================== APPLICATION STARTUP ====================
 
-import signal
-import atexit
+_cleanup_done = False
 
 def cleanup_on_exit():
     """Cleanup function for graceful shutdown"""
+    global _cleanup_done, monitor_thread_running
+    if _cleanup_done:
+        return
+    
     try:
         logger.info("Shutting down AI Micro Break System...")
+        _cleanup_done = True
+        
+        # Stop background task
+        monitor_thread_running = False
         
         # Stop monitoring components
-        if activity_monitor.is_monitoring:
+        if activity_monitor and activity_monitor.is_monitoring:
             activity_monitor.stop_monitoring()
         
-        if fatigue_detector.is_running:
+        if fatigue_detector and fatigue_detector.is_running:
             fatigue_detector.stop_detection()
         
         # Close database connections
-        db_manager.close_pool()
+        if db_manager:
+            db_manager.close_pool()
         
         logger.info("Cleanup completed")
     except Exception as e:
@@ -607,6 +719,9 @@ if __name__ == '__main__':
     try:
         logger.info("Starting AI Micro Break System...")
         
+        # Start background system monitor
+        start_background_task()
+        
         # Create logs directory if not exists
         os.makedirs(LOGGING_CONFIG['log_dir'], exist_ok=True)
         
@@ -617,9 +732,9 @@ if __name__ == '__main__':
             logger.warning("Could not connect to database - some features may not work")
         
         # Run Flask app
-        logger.info(f"Starting server on {APP_CONFIG['host']}:{APP_CONFIG['port']}")
+        logger.info(f"Starting server on 0.0.0.0:{APP_CONFIG['port']}")
         app.run(
-            host=APP_CONFIG['host'],
+            host='0.0.0.0',
             port=APP_CONFIG['port'],
             debug=APP_CONFIG['debug']
         )
